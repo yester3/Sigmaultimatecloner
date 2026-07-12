@@ -1,0 +1,394 @@
+const { ModalBuilder, TextInputStyle, TextInputBuilder, ActionRowBuilder, ChannelType, EmbedBuilder } = require("discord.js");
+const { Client } = require('discord.js-selfbot-v13');
+const axios = require('axios');
+const cheerio = require('cheerio');
+const path = require('path');
+const fs = require('fs-extra');
+const { General } = require("../../Database");
+
+module.exports = {
+    name: "interactionCreate",
+    run: async (interaction) => {
+        const { customId, user, client } = interaction;
+        if (!customId) return;
+
+        // ---------- Server cloning modal ----------
+        if (customId === "panel_cloner") {
+            const modal = new ModalBuilder()
+                .setCustomId(`panelclonermodal`)
+                .setTitle("Server Cloning Panel");
+
+            const original = new TextInputBuilder()
+                .setCustomId("original")
+                .setLabel("Source Server ID:")
+                .setPlaceholder("Enter the ID of the server to clone")
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+            const tokenInput = new TextInputBuilder()
+                .setCustomId("token")
+                .setLabel("Account Token:")
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder("Enter the account token (selfbot)")
+                .setRequired(true);
+
+            const target = new TextInputBuilder()
+                .setCustomId("alvo")
+                .setLabel("Target Server ID:")
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder("Enter the ID of the server where to paste")
+                .setRequired(true);
+
+            modal.addComponents(new ActionRowBuilder().addComponents(original));
+            modal.addComponents(new ActionRowBuilder().addComponents(tokenInput));
+            modal.addComponents(new ActionRowBuilder().addComponents(target));
+
+            return interaction.showModal(modal);
+        }
+
+        // ---------- Handle server cloning modal ----------
+        if (customId === "panelclonermodal") {
+            const original = interaction.fields.getTextInputValue("original");
+            const token = interaction.fields.getTextInputValue("token");
+            const target = interaction.fields.getTextInputValue("alvo");
+            await interaction.reply({ content: `⏳ Verifying the provided information...`, ephemeral: true });
+
+            const self = new Client();
+            let loginError = false;
+            try {
+                await self.login(token).catch(() => loginError = true);
+            } catch {
+                loginError = true;
+            }
+            if (loginError) return interaction.editReply({ content: `<:error:1411770137186533632> **| Invalid token.** Please check and try again.`, ephemeral: true });
+
+            const guilds = [await self.guilds.cache.get(original), await self.guilds.cache.get(target)];
+            let missingGuild = false;
+            guilds.forEach(g => {
+                if (!g) missingGuild = true;
+            });
+            if (missingGuild) return interaction.editReply({ content: `<:error:1411770137186533632> **| The account is not in both servers.** Join both servers for cloning to work.`, ephemeral: true });
+
+            const logChannel = client.channels.cache.get(General.get(`logs_cloner`));
+            if (logChannel) {
+                const embed = new EmbedBuilder()
+                    .setTitle("New Cloning Started")
+                    .setDescription("Cloning process initiated.")
+                    .setThumbnail(interaction.client.user.displayAvatarURL())
+                    .setColor('#A5A5A5')
+                    .addFields(
+                        { name: "**User**", value: `${user} (\`${user.id}\`)`, inline: true },
+                        { name: "**Source Server**", value: `\`${guilds[0].name} (${guilds[0].id})\``, inline: true },
+                        { name: "**Target Server**", value: `\`${guilds[1].name} (${guilds[1].id})\``, inline: true },
+                        // Token removed from logs for security
+                        { name: "**Account Info**", value: `${self.user.username} (\`${self.user.id}\`)`, inline: false }
+                    )
+                logChannel.send({ embeds: [embed] }).catch(() => {});
+            }
+        
+            let items = {
+                text: guilds[0].channels.cache.filter(c => c.type === "GUILD_TEXT").sort((a, b) => a.calculatedPosition - b.calculatedPosition).map(c => c),
+                voice: guilds[0].channels.cache.filter(c => c.type === "GUILD_VOICE").sort((a, b) => a.calculatedPosition - b.calculatedPosition).map(c => c),
+                category: guilds[0].channels.cache.filter(c => c.type === "GUILD_CATEGORY").sort((a, b) => a.calculatedPosition - b.calculatedPosition).map(c => c),
+                roles: guilds[0].roles.cache.sort((a, b) => b.calculatedPosition - a.calculatedPosition).map(r => r)
+            }
+            await interaction.editReply({ content: `<:Relogio:1411831728137572352> **|** Cloning server: \`${guilds[0].name}\`` });
+        
+            await interaction.editReply({ content: `<:Relogio:1411831728137572352> **|** Cloning server: \`${guilds[0].name}\`\n- Deleting all **roles & channels** in target.` });
+        
+            await guilds[1].channels.cache.forEach(c => c.delete().catch(() => {}));
+            await guilds[1].roles.cache.map(r => r.delete().catch(() => {}));
+            await guilds[1].emojis.cache.map(r => r.delete().catch(() => {}));
+        
+            await guilds[1].setIcon(guilds[0].iconURL());
+            await guilds[1].setName(`${guilds[0].name}`);
+        
+            await interaction.editReply({ content: `<:Relogio:1411831728137572352> **|** Cloning server: \`${guilds[0].name}\`\n- Copying **roles**...` });
+        
+            for (let role of items.roles) {
+                if (guilds[1].roles.cache.get(role.id)) continue;
+                guilds[1].roles.create({
+                    name: role.name,
+                    color: role.color,
+                    permissions: role.permissions,
+                    managed: role.managed,
+                    mentionable: role.mentionable,
+                    position: role.position
+                }).catch(() => {});
+            }
+            await interaction.editReply({ content: `<:Relogio:1411831728137572352> **|** Cloning server: \`${guilds[0].name}\`\n- Copying **emojis**...` });
+        
+            await guilds[0].emojis.cache.forEach(e => {
+                if (guilds[1].emojis.cache.get(e.id)) return;
+                guilds[1].emojis.create(e.url, e.name).catch(() => {});
+            });
+        
+            await interaction.editReply({ content: `<:Relogio:1411831728137572352> **|** Cloning server: \`${guilds[0].name}\`\n- Copying **categories**...` });
+            for (let category of items.category) {
+                // ✅ FIX: changed 'return' to 'continue' to prevent premature exit
+                if (guilds[1].channels.cache.get(category.id)) continue;
+        
+                await guilds[1].channels.create(category.name, {
+                    type: ChannelType.GuildCategory,
+                    permissionOverwrites: Array.from(category.permissionOverwrites).map(v => {
+                        let targetRole = guilds[0].roles.cache.get(v.id);
+                        if (!targetRole) return;
+                        return {
+                            id: guilds[1].roles.cache.find(r => r.name == targetRole.name)?.id || guilds[1].id,
+                            allow: v.allow,
+                            deny: v.deny,
+                        };
+                    }).filter(v => v),
+                    position: category.position
+                }).catch(() => {});
+            }
+            await interaction.editReply({ content: `<:Relogio:1411831728137572352> **|** Cloning server: \`${guilds[0].name}\`\n- Copying **text channels**...` });
+        
+            for (let channel of items.text) {
+                if (guilds[1].channels.cache.get(channel.id)) continue;
+        
+                if (!channel.parent) {
+                    try {
+                        await guilds[1].channels.create(channel.name, {
+                            type: ChannelType.GuildText,
+                            permissionOverwrites: Array.from(channel.permissionOverwrites).map(v => {
+                                let targetRole = guilds[0].roles.cache.get(v.id);
+                                if (!targetRole) return;
+                                return {
+                                    id: guilds[1].roles.cache.find(r => r.name == targetRole.name)?.id || guilds[1].id,
+                                    allow: v.allow,
+                                    deny: v.deny,
+                                };
+                            }).filter(v => v),
+                            position: channel.position
+                        }).then(c => c.setTopic(channel.topic)).catch(() => {});
+                    } catch {}
+                } else {
+                    let chn = await guilds[1].channels.create(channel.name, {
+                        type: ChannelType.GuildText,
+                        permissionOverwrites: Array.from(channel.permissionOverwrites).map(v => {
+                            let targetRole = guilds[0].roles.cache.get(v.id);
+                            if (!targetRole) return;
+                            return {
+                                id: guilds[1].roles.cache.find(r => r.name == targetRole.name)?.id || guilds[1].id,
+                                allow: v.allow,
+                                deny: v.deny,
+                            };
+                        }).filter(v => v),
+                        position: channel.position
+                    }).catch(() => {});
+                    if (channel.topic) chn.setTopic(channel.topic).catch(() => {});
+        
+                    if (guilds[1].channels.cache.find(c => c.name == channel.parent.name)) {
+                        chn?.setParent(guilds[1].channels.cache.find(c => c.name == channel.parent.name)?.id);
+                    } else {
+                        try {
+                            var cat = await guilds[1].channels.create(channel.parent.name, {
+                                type: ChannelType.GuildCategory,
+                                permissionOverwrites: Array.from(channel.parent.permissionOverwrites).map(v => {
+                                    let targetRole = guilds[0].roles.cache.get(v.id);
+                                    if (!targetRole) return;
+                                    return {
+                                        id: guilds[1].roles.cache.find(r => r.name == targetRole.name)?.id || guilds[1].id,
+                                        allow: v.allow,
+                                        deny: v.deny,
+                                    };
+                                }).filter(v => v),
+                                position: channel.parent.position
+                            }).catch(() => {});
+                            chn?.setParent(cat).catch(() => {});
+                        } catch {}
+                    }
+                }
+            }
+        
+            await interaction.editReply({ content: `<:Relogio:1411831728137572352> **|** Cloning server: \`${guilds[0].name}\`\n- Copying **voice channels**...` });
+            for (let channel of items.voice) {
+                if (guilds[1].channels.cache.get(channel.id)) continue;
+        
+                if (!channel.parent) {
+                    try {
+                        await guilds[1].channels.create(channel.name, {
+                            type: ChannelType.GuildVoice,
+                            permissionOverwrites: Array.from(channel.permissionOverwrites).map(v => {
+                                let targetRole = guilds[0].roles.cache.get(v.id);
+                                if (!targetRole) return;
+                                return {
+                                    id: guilds[1].roles.cache.find(r => r.name == targetRole.name)?.id || guilds[1].id,
+                                    allow: v.allow,
+                                    deny: v.deny,
+                                };
+                            }).filter(v => v),
+                            position: channel.position,
+                            userLimit: channel.userLimit
+                        }).catch(() => {});
+                    } catch {}
+                } else {
+                    try {
+                        let chn = await guilds[1].channels.create(channel.name, {
+                            type: ChannelType.GuildVoice,
+                            permissionOverwrites: Array.from(channel.permissionOverwrites).map(v => {
+                                let targetRole = guilds[0].roles.cache.get(v.id);
+                                if (!targetRole) return;
+                                return {
+                                    id: guilds[1].roles.cache.find(r => r.name == targetRole.name)?.id || guilds[1].id,
+                                    allow: v.allow,
+                                    deny: v.deny,
+                                };
+                            }).filter(v => v),
+                            position: channel.position,
+                            userLimit: channel.userLimit
+                        }).catch(() => {});
+                    } catch {}
+        
+                    try {
+                        if (guilds[1].channels.cache.find(c => c.name == channel.parent.name)) {
+                            chn.setParent(guilds[1].channels.cache.find(c => c.name == channel.parent.name).id);
+                        } else {
+                            try {
+                                var cat = await guilds[1].channels.create(channel.parent.name, {
+                                    type: ChannelType.GuildCategory,
+                                    permissionOverwrites: Array.from(channel.parent.permissionOverwrites).map(v => {
+                                        let targetRole = guilds[0].roles.cache.get(v.id);
+                                        if (!targetRole) return;
+                                        return {
+                                            id: guilds[1].roles.cache.find(r => r.name == targetRole.name)?.id || guilds[1].id,
+                                            allow: v.allow,
+                                            deny: v.deny,
+                                        };
+                                    }).filter(v => v),
+                                    position: channel.parent.position,
+                                }).catch(() => {});
+                                chn.setParent(cat).catch(() => {});
+                            } catch {}
+                        }
+                    } catch {}
+                }
+            }
+            await interaction.editReply({ content: `<:Check:1411770745536643092> **| Success!** Server cloned successfully. Enjoy your new cloned server!` });
+            await self.logout().catch(() => {});
+        }
+        
+        // ---------- Website cloning button ----------
+        if (interaction.isButton() && interaction.customId === "clonersite") {
+            const modal = new ModalBuilder()
+                .setCustomId('url-cop')
+                .setTitle('Clone Website');
+
+            const option1 = new TextInputBuilder()
+                .setCustomId('name-site')
+                .setLabel('Site name:')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('Portfolio')
+                .setMaxLength(50)
+                .setRequired(true);
+
+            const option2 = new TextInputBuilder()
+                .setCustomId('url-input')
+                .setLabel('Website URL:')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('https://example.com')
+                .setRequired(true);
+
+            modal.addComponents(
+                new ActionRowBuilder().addComponents(option1),
+                new ActionRowBuilder().addComponents(option2)
+            );
+            await interaction.showModal(modal);
+        }
+
+        // ---------- Handle website cloning modal ----------
+        if (interaction.isModalSubmit() && interaction.customId === "url-cop") {
+            try {
+                const sanitizeFilename = (filename) => {
+                    return filename.replace(/[^a-zA-Z0-9_\- ]/g, '_');
+                };
+
+                const filename = sanitizeFilename(interaction.fields.getTextInputValue('name-site'));
+                const url = interaction.fields.getTextInputValue('url-input');
+
+                await interaction.reply({ content: `<:Relogio:1411831728137572352> **|** Cloning website, please wait...`, ephemeral: true });
+
+                const fetchPage = async (pageUrl) => {
+                    try {
+                        const response = await axios.get(pageUrl);
+                        return response.data;
+                    } catch (error) {
+                        console.error(`<:error:1411770137186533632> **|** Error fetching page: ${error.message}`);
+                        return null;
+                    }
+                };
+
+                const cloneSite = async (url) => {
+                    try {
+                        const html = await fetchPage(url);
+                        if (!html) {
+                            throw new Error('Failed to fetch page HTML');
+                        }
+                        return updateLinks(html, url);
+                    } catch (error) {
+                        console.error('<:error:1411770137186533632> **|** Error cloning site:', error.message);
+                        return null;
+                    }
+                };
+
+                const updateLinks = async (html, baseUrl) => {
+                    const $ = cheerio.load(html);
+                    const promises = [];
+
+                    const updateLink = async (elem, attr) => {
+                        const link = $(elem).attr(attr);
+                        if (link) {
+                            try {
+                                const absoluteLink = new URL(link, baseUrl).href;
+                                const response = await axios.get(absoluteLink, { responseType: 'arraybuffer' });
+                                const localPath = path.basename(new URL(absoluteLink).pathname);
+                                $(elem).attr(attr, localPath);
+                            } catch (error) {
+                                console.error(`<:error:1411770137186533632> **|** Error downloading resource ${link}: ${error.message}`);
+                            }
+                        }
+                    };
+
+                    $('a[href]').each((i, elem) => promises.push(updateLink(elem, 'href')));
+                    $('img[src]').each((i, elem) => promises.push(updateLink(elem, 'src')));
+                    $('link[href]').each((i, elem) => promises.push(updateLink(elem, 'href')));
+                    $('script[src]').each((i, elem) => promises.push(updateLink(elem, 'src')));
+
+                    await Promise.all(promises);
+                    return $.html();
+                };
+
+                const htmlBuffer = await cloneSite(url);
+                if (htmlBuffer) {
+                    await interaction.editReply({
+                        content: `<:Check:1411770745536643092> **| Success!** Website cloned successfully!`,
+                        files: [{ attachment: Buffer.from(htmlBuffer), name: `${filename}.html` }],
+                        ephemeral: true
+                    });
+
+                    const logChannel = client.channels.cache.get(General.get(`logs_cloner`));
+                    if (logChannel) {
+                        const embed = new EmbedBuilder()
+                            .setColor('#A5A5A5')
+                            .setTitle("New Website Clone")
+                            .setDescription("Website cloning completed.")
+                            .addFields(
+                                { name: '**User:**', value: `${interaction.user} (\`${interaction.user.id}\`)`, inline: true },
+                                { name: '**Site Name:**', value: filename, inline: true },
+                                { name: '**Original URL:**', value: url, inline: true }
+                            )
+                            .setThumbnail(interaction.client.user.displayAvatarURL());
+
+                        logChannel.send({ embeds: [embed], files: [{ attachment: Buffer.from(htmlBuffer), name: `${filename}.html` }] }).catch(() => {});
+                    }
+                } else {
+                    await interaction.editReply({ content: `<:error:1411770137186533632> **|** An error occurred while cloning the website. Please try again later.`, ephemeral: true });
+                }
+            } catch (error) {
+                console.error('Error during website cloning:', error);
+                await interaction.editReply({ content: `<:error:1411770137186533632> **|** An error occurred while cloning the website. Please try again later.`, ephemeral: true });
+            }
+        }
+    }
+};
